@@ -1271,7 +1271,8 @@ struct page {
 enum slab_type {
 	slab_partial,
 	slab_full,
-	slab_free
+	slab_free,
+	SLAB_TYPES
 };
 
 static const char *slab_type_names[] = {
@@ -1307,6 +1308,7 @@ struct kmem_cache {
 	unsigned int buffer_size;
 	int array_caches_inited;
 	int broken;
+	int slab_wrong_list[SLAB_TYPES];
 };
 
 struct kmem_slab {
@@ -1452,6 +1454,8 @@ check_kmem_slab(struct kmem_cache *cachep, struct kmem_slab *slab,
 	offset o_obj, o_prev_obj = 0;
 	struct page page;
 	offset o_page_cache, o_page_slab;
+	int wrong_list = 0;
+	int wrong_list_warn = 1;
 
 	i = slab->free;
 	while (i != BUFCTL_END) {
@@ -1462,7 +1466,7 @@ check_kmem_slab(struct kmem_cache *cachep, struct kmem_slab *slab,
 			break;
 		}
 		if (i > cachep->num) {
-			printf("bufctl value overflow (%d) in slab %llx\n", i, o_slab);
+			printf("bufctl value overflow: %d(0x%x) in slab %llx\n", i, i, o_slab);
 			break;
 		}
 
@@ -1476,25 +1480,45 @@ check_kmem_slab(struct kmem_cache *cachep, struct kmem_slab *slab,
 		 printf("slab %llx #objs mismatch: inuse=%d + cnt_free=%d != num=%d\n",
 				o_slab, slab->inuse, counted_free, cachep->num);
 
+	if (cachep->slab_wrong_list[type] >= 10)
+		wrong_list_warn = 0;
+
 	switch (type) {
 	case slab_partial:
-		if (!slab->inuse)
-			printf("slab %llx has zero inuse but is on slabs_partial\n", o_slab);
-		else if (slab->inuse == cachep->num)
-			printf("slab %llx is full (%d) but is on slabs_partial\n", o_slab, slab->inuse);
+		if (!slab->inuse) {
+			wrong_list = 1;
+			if (wrong_list_warn)
+				warning(_("slab %llx has zero inuse but is on slabs_partial\n"), o_slab);
+		} else if (slab->inuse == cachep->num) {
+			wrong_list = 1;
+			if (wrong_list_warn)
+				warning(_("slab %llx is full (%d) but is on slabs_partial\n"), o_slab, slab->inuse);
+		}
 		break;
 	case slab_full:
-		if (!slab->inuse)
-			printf("slab %llx has zero inuse but is on slabs_full\n", o_slab);
-		else if (slab->inuse < cachep->num)
-			printf("slab %llx has %d/%d inuse but is on slabs_full\n", o_slab, slab->inuse, cachep->num);
+		if (!slab->inuse) {
+			wrong_list = 1;
+			if (wrong_list_warn)
+				warning(_("slab %llx has zero inuse but is on slabs_full\n"), o_slab);
+		} else if (slab->inuse < cachep->num) {
+			wrong_list = 1;
+			if (wrong_list_warn)
+				warning(_("slab %llx has %d/%d inuse but is on slabs_full\n"), o_slab, slab->inuse, cachep->num);
+		}
 		break;
 	case slab_free:
-		if (slab->inuse)
-			printf("slab %llx has %d/%d inuse but is on slabs_empty\n", o_slab, slab->inuse, cachep->num);
+		if (slab->inuse) {
+			wrong_list = 1;
+			if (wrong_list_warn)
+				warning(_("slab %llx has %d/%d inuse but is on slabs_empty\n"), o_slab, slab->inuse, cachep->num);
+		}
 		break;
 	default:
-		exit(1);
+		error(_("unexpected slab type %d passed to check_kmem_slab\n"), type);
+	}
+	if (wrong_list && (++cachep->slab_wrong_list[type] == 10)) {
+		warning(_("too many slabs wrongly placed on %s list of cache %s, further won't be reported\n"),
+				slab_type_names[type], cachep->name);
 	}
 
 	for (i = 0; i < cachep->num; i++) {
@@ -1516,9 +1540,9 @@ check_kmem_slab(struct kmem_cache *cachep, struct kmem_slab *slab,
 		o_page_slab = page.lru.prev;
 
 		if (o_page_cache != cachep->o_cache)
-			warning(_("cache %llx (%s) object %llx is on page where lru.next points to %llx and not the cache\n"),
-					cachep->o_cache, cachep->name, o_obj,
-					o_page_cache);
+			warning(_("cache %llx (%s) slab %llx object %llx is on page where lru.next points to %llx and not the cache\n"),
+					cachep->o_cache,cachep->name, o_slab,
+					o_obj, o_page_cache);
 		if (o_page_slab != o_slab)
 			warning(_("slab %llx object %llx is on page where lru.prev points to %llx and not the slab\n"),
 					o_slab, o_obj, o_page_slab);
@@ -1549,6 +1573,9 @@ check_kmem_slabs(struct kmem_cache *cachep, offset o_slabs,
 		counted_free += check_kmem_slab(cachep, slab, type);
 		free_kmem_slab(slab);
 	}
+	if (iter.error)
+		warning(_("there were errors iterating %s slab list %llx of cache %s\n"),
+				slab_type_names[type], o_slabs, cachep->name);
 
 	return counted_free;
 }
@@ -1802,6 +1829,8 @@ static struct kmem_cache *init_kmem_cache(offset o_cache)
 
 	cache->name = kt_strndup(o_cache_name, 128);
 	cache->broken = 0;
+	for (int i = 0; i < SLAB_TYPES; i++)
+		cache->slab_wrong_list[i] = 0;
 //	printf("cache name is: %s\n", cache->name);
 
 done:
